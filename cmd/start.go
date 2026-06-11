@@ -275,6 +275,18 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 		})
 		log.Printf("[agent] created HTTP agent: %s (endpoint=%s, model=%s)", name, agCfg.Endpoint, agCfg.Model)
 		return ag
+	case "mimo":
+		ag := agent.NewMiMoAgent(agent.MiMoAgentConfig{
+			Name:         name,
+			Command:      agCfg.Command,
+			Args:         agCfg.Args,
+			Cwd:          agCfg.Cwd,
+			Env:          agCfg.Env,
+			Model:        agCfg.Model,
+			SystemPrompt: agCfg.SystemPrompt,
+		})
+		log.Printf("[agent] created MiMo agent: %s (command=%s, type=%s, model=%s)", name, agCfg.Command, agCfg.Type, agCfg.Model)
+		return ag
 	default:
 		log.Printf("[agent] unknown type %q for %q", agCfg.Type, name)
 		return nil

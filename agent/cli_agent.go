@@ -107,6 +107,8 @@ func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message stri
 	switch a.name {
 	case "codex":
 		return a.chatCodex(ctx, message)
+	case "mimo":
+		return a.chatMiMo(ctx, message)
 	default:
 		return a.chatClaude(ctx, conversationID, message)
 	}
@@ -275,6 +277,47 @@ func (a *CLIAgent) chatCodex(ctx context.Context, message string) (string, error
 	result := strings.TrimSpace(string(out))
 	if result == "" {
 		return "", fmt.Errorf("codex returned empty response")
+	}
+	return result, nil
+}
+
+// chatMiMo handles MiMo Code CLI invocation using "mimo run".
+func (a *CLIAgent) chatMiMo(ctx context.Context, message string) (string, error) {
+	args := []string{"run", message, "--dangerously-skip-permissions"}
+
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
+	// Append extra args from config
+	args = append(args, a.args...)
+
+	log.Printf("[cli] running mimo run (command=%s)", a.command)
+	cmd := exec.CommandContext(ctx, a.command, args...)
+	if a.cwd != "" {
+		cmd.Dir = a.cwd
+	}
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			return "", fmt.Errorf("build %s env: %w", a.name, err)
+		}
+		cmd.Env = cmdEnv
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return "", fmt.Errorf("mimo error: %w, stderr: %s", err, errMsg)
+		}
+		return "", fmt.Errorf("mimo error: %w", err)
+	}
+
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", fmt.Errorf("mimo returned empty response")
 	}
 	return result, nil
 }
