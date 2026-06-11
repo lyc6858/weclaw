@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -114,46 +113,14 @@ func (a *MiMoAgent) Chat(ctx context.Context, conversationID string, message str
 		}
 		cmd.Env = cmdEnv
 	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-
-	stdout, err := cmd.StdoutPipe()
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("create stdout pipe: %w", err)
+		return "", fmt.Errorf("%s error: %w", a.name, err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start %s: %w", a.name, err)
-	}
+	log.Printf("[mimo] process exited (command=%s)", a.command)
 
-	log.Printf("[mimo] spawned process (command=%s, pid=%d, conversation=%s)", a.command, cmd.Process.Pid, conversationID)
-
-	// Parse streaming output - MiMo outputs plain text
-	var result strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Skip empty lines and status lines
-		if line == "" || strings.HasPrefix(line, "[0m") || strings.HasPrefix(line, ">") {
-			continue
-		}
-		result.WriteString(line)
-		result.WriteString("\n")
-	}
-
-	if err := cmd.Wait(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return "", fmt.Errorf("%s exited with error: %w, stderr: %s", a.name, err, errMsg)
-		}
-		return "", fmt.Errorf("%s exited with error: %w", a.name, err)
-	}
-
-	log.Printf("[mimo] process exited (command=%s, pid=%d)", a.command, cmd.Process.Pid)
-
-	response := strings.TrimSpace(result.String())
+	response := strings.TrimSpace(string(out))
 	if response == "" {
 		return "", fmt.Errorf("%s returned empty response", a.name)
 	}
