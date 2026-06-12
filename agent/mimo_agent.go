@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -78,9 +80,18 @@ func (a *MiMoAgent) SetCwd(cwd string) {
 	a.cwd = cwd
 }
 
+// mimoEvent represents a single JSON event from `mimo run --format json`.
+type mimoEvent struct {
+	Type      string `json:"type"`
+	SessionID string `json:"sessionID"`
+	Part      *struct {
+		Text string `json:"text"`
+	} `json:"part,omitempty"`
+}
+
 // Chat sends a message to the MiMo agent and returns the response.
 func (a *MiMoAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
-	args := []string{"run", message, "--dangerously-skip-permissions"}
+	args := []string{"run", message, "--dangerously-skip-permissions", "--format", "json"}
 
 	if a.model != "" {
 		args = append(args, "--model", a.model)
@@ -96,7 +107,7 @@ func (a *MiMoAgent) Chat(ctx context.Context, conversationID string, message str
 	a.mu.Unlock()
 
 	if hasSession {
-		args = append(args, "--continue")
+		args = append(args, "--session", sessionID)
 		log.Printf("[mimo] resuming session (session=%s, conversation=%s)", sessionID, conversationID)
 	} else {
 		log.Printf("[mimo] starting new conversation (conversation=%s)", conversationID)
@@ -113,14 +124,54 @@ func (a *MiMoAgent) Chat(ctx context.Context, conversationID string, message str
 		}
 		cmd.Env = cmdEnv
 	}
-	out, err := cmd.Output()
+
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return "", fmt.Errorf("create stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start %s: %w", a.name, err)
+	}
+
+	// Parse streaming JSON events to extract sessionID and text
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	var texts []string
+	var newSessionID string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var event mimoEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.SessionID != "" {
+			newSessionID = event.SessionID
+		}
+		if event.Type == "text" && event.Part != nil && event.Part.Text != "" {
+			texts = append(texts, event.Part.Text)
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
 		return "", fmt.Errorf("%s error: %w", a.name, err)
 	}
 
 	log.Printf("[mimo] process exited (command=%s)", a.command)
 
-	response := strings.TrimSpace(string(out))
+	// Save session ID for multi-turn conversation
+	if newSessionID != "" {
+		a.mu.Lock()
+		a.sessions[conversationID] = newSessionID
+		a.mu.Unlock()
+		log.Printf("[mimo] saved session (session=%s, conversation=%s)", newSessionID, conversationID)
+	}
+
+	response := strings.TrimSpace(strings.Join(texts, ""))
 	if response == "" {
 		return "", fmt.Errorf("%s returned empty response", a.name)
 	}

@@ -108,7 +108,7 @@ func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message stri
 	case "codex":
 		return a.chatCodex(ctx, message)
 	case "mimo":
-		return a.chatMiMo(ctx, message)
+		return a.chatMiMo(ctx, conversationID, message)
 	default:
 		return a.chatClaude(ctx, conversationID, message)
 	}
@@ -281,13 +281,26 @@ func (a *CLIAgent) chatCodex(ctx context.Context, message string) (string, error
 	return result, nil
 }
 
-// chatMiMo handles MiMo Code CLI invocation using "mimo run".
-func (a *CLIAgent) chatMiMo(ctx context.Context, message string) (string, error) {
-	args := []string{"run", message, "--dangerously-skip-permissions"}
+// chatMiMo handles MiMo Code CLI invocation using "mimo run" with session tracking.
+func (a *CLIAgent) chatMiMo(ctx context.Context, conversationID string, message string) (string, error) {
+	args := []string{"run", message, "--dangerously-skip-permissions", "--format", "json"}
 
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}
+
+	// Resume existing session for multi-turn conversation
+	a.mu.Lock()
+	sessionID, hasSession := a.sessions[conversationID]
+	a.mu.Unlock()
+
+	if hasSession {
+		args = append(args, "--session", sessionID)
+		log.Printf("[cli] mimo resuming session (session=%s, conversation=%s)", sessionID, conversationID)
+	} else {
+		log.Printf("[cli] mimo starting new conversation (conversation=%s)", conversationID)
+	}
+
 	// Append extra args from config
 	args = append(args, a.args...)
 
@@ -306,8 +319,43 @@ func (a *CLIAgent) chatMiMo(ctx context.Context, message string) (string, error)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
-	out, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return "", fmt.Errorf("create stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return "", fmt.Errorf("start mimo: %w, stderr: %s", err, errMsg)
+		}
+		return "", fmt.Errorf("start mimo: %w", err)
+	}
+
+	// Parse streaming JSON events
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	var texts []string
+	var newSessionID string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var event mimoEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.SessionID != "" {
+			newSessionID = event.SessionID
+		}
+		if event.Type == "text" && event.Part != nil && event.Part.Text != "" {
+			texts = append(texts, event.Part.Text)
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
 			return "", fmt.Errorf("mimo error: %w, stderr: %s", err, errMsg)
@@ -315,7 +363,15 @@ func (a *CLIAgent) chatMiMo(ctx context.Context, message string) (string, error)
 		return "", fmt.Errorf("mimo error: %w", err)
 	}
 
-	result := strings.TrimSpace(string(out))
+	// Save session ID for multi-turn conversation
+	if newSessionID != "" {
+		a.mu.Lock()
+		a.sessions[conversationID] = newSessionID
+		a.mu.Unlock()
+		log.Printf("[cli] mimo saved session (session=%s, conversation=%s)", newSessionID, conversationID)
+	}
+
+	result := strings.TrimSpace(strings.Join(texts, ""))
 	if result == "" {
 		return "", fmt.Errorf("mimo returned empty response")
 	}
