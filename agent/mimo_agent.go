@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,7 @@ type MiMoAgent struct {
 	systemPrompt string
 	mu           sync.Mutex
 	sessions     map[string]string
+	sessionsPath string // path to sessions.json for persistence
 }
 
 // MiMoAgentConfig holds configuration for a MiMo agent.
@@ -36,12 +38,59 @@ type MiMoAgentConfig struct {
 	SystemPrompt string
 }
 
+// sessionsFilePath returns the path to the sessions persistence file.
+func sessionsFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".weclaw", "sessions.json"), nil
+}
+
+// loadSessions loads sessions from disk.
+func loadSessions(path string) map[string]string {
+	sessions := make(map[string]string)
+	if path == "" {
+		return sessions
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sessions
+		}
+		log.Printf("[mimo] warning: failed to load sessions: %v", err)
+		return sessions
+	}
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		log.Printf("[mimo] warning: failed to parse sessions: %v", err)
+		return sessions
+	}
+	log.Printf("[mimo] loaded %d sessions from disk", len(sessions))
+	return sessions
+}
+
+// saveSessions saves sessions to disk.
+func saveSessions(path string, sessions map[string]string) {
+	if path == "" {
+		return
+	}
+	data, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		log.Printf("[mimo] warning: failed to marshal sessions: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		log.Printf("[mimo] warning: failed to save sessions: %v", err)
+	}
+}
+
 // NewMiMoAgent creates a new MiMo agent.
 func NewMiMoAgent(cfg MiMoAgentConfig) *MiMoAgent {
 	cwd := cfg.Cwd
 	if cwd == "" {
 		cwd = defaultWorkspace()
 	}
+	sessionsPath, _ := sessionsFilePath()
 	return &MiMoAgent{
 		name:         cfg.Name,
 		command:      cfg.Command,
@@ -50,7 +99,8 @@ func NewMiMoAgent(cfg MiMoAgentConfig) *MiMoAgent {
 		env:          cfg.Env,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
-		sessions:     make(map[string]string),
+		sessions:     loadSessions(sessionsPath),
+		sessionsPath: sessionsPath,
 	}
 }
 
@@ -68,6 +118,7 @@ func (a *MiMoAgent) Info() AgentInfo {
 func (a *MiMoAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
 	a.mu.Lock()
 	delete(a.sessions, conversationID)
+	saveSessions(a.sessionsPath, a.sessions)
 	a.mu.Unlock()
 	log.Printf("[mimo] session reset (conversation=%s)", conversationID)
 	return "", nil
@@ -167,6 +218,7 @@ func (a *MiMoAgent) Chat(ctx context.Context, conversationID string, message str
 	if newSessionID != "" {
 		a.mu.Lock()
 		a.sessions[conversationID] = newSessionID
+		saveSessions(a.sessionsPath, a.sessions)
 		a.mu.Unlock()
 		log.Printf("[mimo] saved session (session=%s, conversation=%s)", newSessionID, conversationID)
 	}

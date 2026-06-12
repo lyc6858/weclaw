@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,7 @@ type CLIAgent struct {
 	systemPrompt string
 	mu           sync.Mutex
 	sessions     map[string]string // conversationID -> session ID for multi-turn
+	sessionsPath string            // path to sessions.json for persistence
 }
 
 // CLIAgentConfig holds configuration for a CLI agent.
@@ -42,6 +44,7 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 	if cwd == "" {
 		cwd = defaultWorkspace()
 	}
+	sessionsPath, _ := sessionsFilePath()
 	return &CLIAgent{
 		name:         cfg.Name,
 		command:      cfg.Command,
@@ -50,7 +53,8 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 		env:          cfg.Env,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
-		sessions:     make(map[string]string),
+		sessions:     loadSessions(sessionsPath),
+		sessionsPath: sessionsPath,
 	}
 }
 
@@ -90,6 +94,7 @@ func (a *CLIAgent) Info() AgentInfo {
 func (a *CLIAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
 	a.mu.Lock()
 	delete(a.sessions, conversationID)
+	saveSessions(a.sessionsPath, a.sessions)
 	a.mu.Unlock()
 	log.Printf("[cli] session reset (command=%s, conversation=%s)", a.command, conversationID)
 	return "", nil
@@ -229,6 +234,7 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	if newSessionID != "" {
 		a.mu.Lock()
 		a.sessions[conversationID] = newSessionID
+		saveSessions(a.sessionsPath, a.sessions)
 		a.mu.Unlock()
 		log.Printf("[cli] saved session (session=%s, conversation=%s)", newSessionID, conversationID)
 	}
@@ -367,6 +373,7 @@ func (a *CLIAgent) chatMiMo(ctx context.Context, conversationID string, message 
 	if newSessionID != "" {
 		a.mu.Lock()
 		a.sessions[conversationID] = newSessionID
+		saveSessions(a.sessionsPath, a.sessions)
 		a.mu.Unlock()
 		log.Printf("[cli] mimo saved session (session=%s, conversation=%s)", newSessionID, conversationID)
 	}
